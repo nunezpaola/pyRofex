@@ -205,10 +205,28 @@ class WebSocketClient():
             self.exception_handler(exception)
 
     def on_close(self, ws, close_status_code, close_msg):
-        """ Called when the connection is closed.
-        """
+        """Called when the connection is closed."""
         logging.log(logging.INFO, f"connection closed. code: {close_status_code}. message: {close_msg}")
         self.connected = False
+
+        if close_status_code == 1008:
+            logging.warning("Sesión HTTP expirada. Intentando reconexión...")
+
+            try:
+                # Reautenticás. Asegurate de tener token accesible
+                self.login(token=self.token)
+
+                # Reconectás el WebSocket
+                self.init_websocket_connection(
+                    market_data_handler=self.market_data_handler,
+                    order_report_handler=self.order_report_handler,
+                    error_handler=self.error_handler,
+                    exception_handler=self.exception_handler
+                )
+
+                logging.info("Reconexión realizada exitosamente.")
+            except Exception as e:
+                logging.error(f"Error al intentar reconectar: {e}")
 
     def on_open(self, ws):
         """ Called when the connection is opened.
