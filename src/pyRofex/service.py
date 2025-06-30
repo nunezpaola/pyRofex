@@ -216,7 +216,7 @@ def get_instrument_details(ticker, market=Market.ROFEX, environment=None):
     return client.get_instrument_details(ticker, market)
 
 
-def get_market_data(ticker, entries=None, depth=1, market=Market.ROFEX, environment=None):
+def get_market_data(ticker, entries=None, depth=5, market=Market.ROFEX, environment=None):
     """Make a request to the API to get the Market Data Entries of the specified instrument.
 
     For more detailed information go to: https://apihub.primary.com.ar/assets/docs/Primary-API.pdf
@@ -527,7 +527,7 @@ def init_websocket_connection(market_data_handler=None,
     :param environment: Environment used. Default None: the default environment is used.
     :type environment: Environment (Enum).
     """
-
+    print('Ur ok bro:)')
     # Validations
     environment = _validate_environment(environment)
     _validate_initialization(environment)
@@ -607,7 +607,7 @@ def order_report_subscription(account=None, snapshot=True, handler=None, environ
     client.order_report_subscription(account, snapshot)
 
 
-def market_data_subscription(tickers, entries, depth=1, market=Market.ROFEX, handler=None, environment=None):
+def market_data_subscription(tickers, entries, depth=5, market=Market.ROFEX, handler=None, environment=None):
     """Send a Market Data Subscription Message through the connection.
 
     :param tickers: list of the the instruments to be subscribe.
@@ -615,7 +615,7 @@ def market_data_subscription(tickers, entries, depth=1, market=Market.ROFEX, han
     :param entries: List of market data entries that want to be received.
     Example: [MarketDataEntry.BIDS, MarketDataEntry.OFFERS]
     :type entries: List of MarketDataEntry (Enum).
-    :param depth: Market depth to received. default: 1 (top of book)
+    :param depth: Market depth to received. default: 5 (top of book)
     :type depth: int
     :param market: Market id associated to the tickers. Default Market.ROFEX.
     :type market: Market (Enum).
