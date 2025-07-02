@@ -50,6 +50,17 @@ class WebSocketClient():
         self.ws_connection = None
         self.ws_thread = None
         self.connected = False
+        
+        # Reconnection control variables
+        self.auto_reconnect = True
+        self.max_reconnect_attempts = 3
+        self.reconnect_delay = 2
+        
+        # Subscription tracking for reconnection
+        self.active_subscriptions = {
+            'market_data': [],      # Lista de suscripciones de market data
+            'order_report': []      # Lista de suscripciones de order report
+        }
 
     def add_market_data_handler(self, handler):
         """ Adds a new Market Data handler to the handlers list.
@@ -210,23 +221,10 @@ class WebSocketClient():
         self.connected = False
 
         if close_status_code == 1008:
-            logging.warning("Sesión HTTP expirada. Intentando reconexión...")
-
-            try:
-                # Reautenticás. Asegurate de tener token accesible
-                self.login(token=self.token)
-
-                # Reconectás el WebSocket
-                self.init_websocket_connection(
-                    market_data_handler=self.market_data_handler,
-                    order_report_handler=self.order_report_handler,
-                    error_handler=self.error_handler,
-                    exception_handler=self.exception_handler
-                )
-
-                logging.info("Reconexión realizada exitosamente.")
-            except Exception as e:
-                logging.error(f"Error al intentar reconectar: {e}")
+            logging.warning("Conexión cerrada con código 1008. Intentando reconexión automática...")
+            # Ejecutar reconexión en un hilo separado para no bloquear
+            reconnection_thread = threading.Thread(target=self._attempt_reconnection, daemon=True)
+            reconnection_thread.start()
 
     def on_open(self, ws):
         """ Called when the connection is opened.
@@ -260,6 +258,29 @@ class WebSocketClient():
         :type depth: int
         """
 
+        # Store subscription info for reconnection
+        subscription_info = {
+            'tickers': tickers,
+            'entries': entries,
+            'market': market,
+            'depth': depth
+        }
+        
+        # Check if this subscription already exists
+        existing_sub = None
+        for sub in self.active_subscriptions['market_data']:
+            if (sub['tickers'] == tickers and 
+                sub['market'] == market and 
+                sub['depth'] == depth and
+                sub['entries'] == entries):
+                existing_sub = sub
+                break
+        
+        # Add or update subscription
+        if not existing_sub:
+            self.active_subscriptions['market_data'].append(subscription_info)
+            logging.info(f"Guardada suscripción MD: {tickers} en {market.value}")
+
         # Iterates through the tickers list and creates a new list of Instrument String using the INSTRUMENT Template.
         # Then create a comma separated string with the instruments in the list.
         instruments = [messages.INSTRUMENT.format(ticker=ticker, market=market.value) for ticker in tickers]
@@ -286,6 +307,24 @@ class WebSocketClient():
         :param snapshot: True: old Order Reports won't be received; False: old Order Report will be received.
         :type snapshot: boolean.
         """
+
+        # Store subscription info for reconnection
+        subscription_info = {
+            'account': account,
+            'snapshot': snapshot
+        }
+        
+        # Check if this subscription already exists
+        existing_sub = None
+        for sub in self.active_subscriptions['order_report']:
+            if sub['account'] == account and sub['snapshot'] == snapshot:
+                existing_sub = sub
+                break
+        
+        # Add subscription if it doesn't exist
+        if not existing_sub:
+            self.active_subscriptions['order_report'].append(subscription_info)
+            logging.info(f"Guardada suscripción OR: {account}")
 
         # Create an Order Subscription message using the Template and the parameters.
         message = messages.ORDER_SUBSCRIPTION.format(a=account, snapshot=snapshot.__str__().lower())
@@ -377,3 +416,140 @@ class WebSocketClient():
                                                            all_or_none=all_or_none,
                                                            order_type=order_type.value,
                                                            optional_params=opt_params))
+
+    def _attempt_reconnection(self):
+        """Attempt to reconnect the WebSocket connection with exponential backoff."""
+        if not self.auto_reconnect:
+            return
+            
+        max_attempts = self.max_reconnect_attempts
+        initial_delay = self.reconnect_delay
+        attempt = 1
+        delay = initial_delay
+        
+        while attempt <= max_attempts:
+            try:
+                logging.info(f"Intento de reconexión {attempt}/{max_attempts}...")
+                
+                # Wait before attempting reconnection
+                time.sleep(delay)
+                
+                # First attempt: try simple reconnection without re-authentication
+                if attempt == 1:
+                    logging.info("Intentando reconexión simple (sin reautenticación)...")
+                    self.connect()
+                    
+                    if self.is_connected():
+                        logging.info("Reconexión simple exitosa.")
+                        # Restore subscriptions after successful reconnection
+                        time.sleep(1)  # Wait a moment for connection to stabilize
+                        self._restore_subscriptions()
+                        return
+                else:
+                    # Subsequent attempts: try re-authentication
+                    logging.info("Intentando reconexión con reautenticación...")
+                    
+                    # Find the corresponding REST client and update token
+                    for env_key, env_config in globals.environment_config.items():
+                        if env_config.get('ws_client') == self:
+                            rest_client = env_config.get('rest_client')
+                            if rest_client:
+                                rest_client.update_token()
+                                logging.info("Token actualizado exitosamente.")
+                                break
+                    
+                    # Try to reconnect with new token
+                    self.connect()
+                    
+                    if self.is_connected():
+                        logging.info("Reconexión con reautenticación exitosa.")
+                        # Restore subscriptions after successful reconnection
+                        time.sleep(1)  # Wait a moment for connection to stabilize
+                        self._restore_subscriptions()
+                        return
+                
+            except Exception as e:
+                logging.error(f"Intento {attempt} falló: {e}")
+            
+            attempt += 1
+            delay *= 2  # Exponential backoff
+        
+        # All attempts failed
+        logging.error(f"Falló la reconexión después de {max_attempts} intentos.")
+        if self.exception_handler:
+            self.exception_handler(ApiException(f"Reconexión automática falló después de {max_attempts} intentos"))
+
+    def set_auto_reconnect(self, enabled=True, max_attempts=3, delay=2):
+        """Configure automatic reconnection parameters.
+        
+        :param enabled: Enable or disable automatic reconnection
+        :type enabled: bool
+        :param max_attempts: Maximum number of reconnection attempts
+        :type max_attempts: int
+        :param delay: Initial delay between attempts in seconds
+        :type delay: int
+        """
+        self.auto_reconnect = enabled
+        self.max_reconnect_attempts = max_attempts
+        self.reconnect_delay = delay
+        logging.info(f"Auto-reconexión configurada: habilitada={enabled}, max_intentos={max_attempts}, delay={delay}s")
+
+    def disable_auto_reconnect(self):
+        """Disable automatic reconnection."""
+        self.auto_reconnect = False
+        logging.info("Auto-reconexión deshabilitada")
+
+    def _restore_subscriptions(self):
+        """Restore all active subscriptions after reconnection."""
+        try:
+            # Restore market data subscriptions
+            for sub in self.active_subscriptions['market_data']:
+                logging.info(f"Restaurando suscripción MD: {sub['tickers']} en {sub['market'].value}")
+                
+                # Create the subscription message
+                instruments = [messages.INSTRUMENT.format(ticker=ticker, market=sub['market'].value) 
+                             for ticker in sub['tickers']]
+                instruments_string = ",".join(instruments)
+                
+                entries = [messages.DOUBLE_QUOTES.format(item=entry.value) for entry in sub['entries']]
+                entries_string = ",".join(entries)
+                
+                message = messages.MARKET_DATA_SUBSCRIPTION.format(
+                    depth=sub['depth'],
+                    entries=entries_string,
+                    symbols=instruments_string
+                )
+                
+                self.ws_connection.send(message)
+                time.sleep(0.1)  # Small delay between subscriptions
+            
+            # Restore order report subscriptions
+            for sub in self.active_subscriptions['order_report']:
+                logging.info(f"Restaurando suscripción OR: {sub['account']}")
+                
+                message = messages.ORDER_SUBSCRIPTION.format(
+                    a=sub['account'], 
+                    snapshot=sub['snapshot'].__str__().lower()
+                )
+                
+                self.ws_connection.send(message)
+                time.sleep(0.1)  # Small delay between subscriptions
+            
+            if (len(self.active_subscriptions['market_data']) > 0 or 
+                len(self.active_subscriptions['order_report']) > 0):
+                logging.info("Todas las suscripciones han sido restauradas exitosamente.")
+            
+        except Exception as e:
+            logging.error(f"Error al restaurar suscripciones: {e}")
+
+    def clear_subscriptions(self):
+        """Clear all stored subscriptions."""
+        self.active_subscriptions = {
+            'market_data': [],
+            'order_report': []
+        }
+        logging.info("Todas las suscripciones guardadas han sido limpiadas.")
+
+    def get_active_subscriptions(self):
+        """Get current active subscriptions."""
+        return self.active_subscriptions.copy()
